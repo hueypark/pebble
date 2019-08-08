@@ -852,20 +852,20 @@ func (i *twoLevelCompactionIterator) First() (*InternalKey, []byte) {
 		// An empty sstable will still encode the block trailer and restart points, so bytes
 		// iterated must be incremented.
 
-		// We must use i.dataBH.length instead of (4*(i.data.numRestarts+1)) to calculate the
-		// number of bytes for the restart points, since i.dataBH.length accounts for
-		// compression. When uncompressed, i.dataBH.length == (4*(i.data.numRestarts+1))
-		*i.bytesIterated += blockTrailerLen + i.dataBH.length
+		// We must use i.dataBH.Length instead of (4*(i.data.numRestarts+1)) to calculate the
+		// number of bytes for the restart points, since i.dataBH.Length accounts for
+		// compression. When uncompressed, i.dataBH.Length == (4*(i.data.numRestarts+1))
+		*i.bytesIterated += blockTrailerLen + i.dataBH.Length
 		return nil, nil
 	}
 	// If the sstable only has 1 entry, we are at the last entry in the block and we must
 	// increment bytes iterated by the size of the block trailer and restart points.
 	if i.data.nextOffset+(4*(i.data.numRestarts+1)) == int32(len(i.data.data)) {
-		i.prevOffset = blockTrailerLen + i.dataBH.length
+		i.prevOffset = blockTrailerLen + i.dataBH.Length
 	} else {
-		// i.dataBH.length/len(i.data.data) is the compression ratio. If uncompressed, this is 1.
+		// i.dataBH.Length/len(i.data.data) is the compression ratio. If uncompressed, this is 1.
 		// i.data.nextOffset is the uncompressed size of the first record.
-		i.prevOffset = (uint64(i.data.nextOffset) * i.dataBH.length) / uint64(len(i.data.data))
+		i.prevOffset = (uint64(i.data.nextOffset) * i.dataBH.Length) / uint64(len(i.data.data))
 	}
 	*i.bytesIterated += i.prevOffset
 	return key, val
@@ -901,15 +901,15 @@ func (i *twoLevelCompactionIterator) Next() (*InternalKey, []byte) {
 		}
 	}
 
-	// i.dataBH.length/len(i.data.data) is the compression ratio. If uncompressed, this is 1.
+	// i.dataBH.Length/len(i.data.data) is the compression ratio. If uncompressed, this is 1.
 	// i.data.nextOffset is the uncompressed position of the current record in the block.
 	// i.dataBH.offset is the offset of the block in the sstable before decompression.
-	recordOffset := (uint64(i.data.nextOffset) * i.dataBH.length) / uint64(len(i.data.data))
-	curOffset := i.dataBH.offset + recordOffset
+	recordOffset := (uint64(i.data.nextOffset) * i.dataBH.Length) / uint64(len(i.data.data))
+	curOffset := i.dataBH.Offset + recordOffset
 	// Last entry in the block must increment bytes iterated by the size of the block trailer
 	// and restart points.
 	if i.data.nextOffset+(4*(i.data.numRestarts+1)) == int32(len(i.data.data)) {
-		curOffset = i.dataBH.offset + i.dataBH.length + blockTrailerLen
+		curOffset = i.dataBH.Offset + i.dataBH.Length + blockTrailerLen
 	}
 	*i.bytesIterated += uint64(curOffset - i.prevOffset)
 	i.prevOffset = curOffset
@@ -1242,11 +1242,7 @@ func (r *Reader) readMetaindex(metaindexBH BlockHandle, o *Options) error {
 		r.rangeDelTransform = r.transformRangeDelV1
 	}
 
-	for level := range r.opts.Levels {
-		fp := r.opts.Levels[level].FilterPolicy
-		if fp == nil {
-			continue
-		}
+	for name, fp := range r.opts.Filters {
 		types := []struct {
 			ftype  FilterType
 			prefix string
@@ -1255,7 +1251,7 @@ func (r *Reader) readMetaindex(metaindexBH BlockHandle, o *Options) error {
 		}
 		var done bool
 		for _, t := range types {
-			if bh, ok := meta[t.prefix+fp.Name()]; ok {
+			if bh, ok := meta[t.prefix+name]; ok {
 				r.filter.bh = bh
 
 				switch t.ftype {
@@ -1337,8 +1333,9 @@ func (r *Reader) Layout() (*Layout, error) {
 
 // NewReader returns a new table reader for the file. Closing the reader will
 // close the file.
-func NewReader(f vfs.File, dbNum, fileNum uint64, o *Options) *Reader {
+func NewReader(f vfs.File, dbNum, fileNum uint64, o *Options) (*Reader, error) {
 	o = o.EnsureDefaults()
+
 	r := &Reader{
 		file:    f,
 		dbNum:   dbNum,
@@ -1350,22 +1347,40 @@ func NewReader(f vfs.File, dbNum, fileNum uint64, o *Options) *Reader {
 	}
 	if f == nil {
 		r.err = errors.New("pebble/table: nil file")
-		return r
+		return r, r.err
 	}
 	footer, err := readFooter(f)
 	if err != nil {
 		r.err = err
-		return r
+		return r, r.err
 	}
 	// Read the metaindex.
 	if err := r.readMetaindex(footer.metaindexBH, o); err != nil {
 		r.err = err
-		return r
+		return r, r.err
 	}
 	r.index.bh = footer.indexBH
 	r.metaIndexBH = footer.metaindexBH
 	r.footerBH = footer.footerBH
-	return r
+
+	if r.Properties.ComparerName == "" {
+		r.compare = o.Comparer.Compare
+		r.split = o.Comparer.Split
+	} else if comparer, ok := o.Comparers[r.Properties.ComparerName]; ok {
+		r.compare = comparer.Compare
+		r.split = comparer.Split
+	} else {
+		r.err = fmt.Errorf("pebble/table: %d: unknown comparer %s",
+			fileNum, r.Properties.ComparerName)
+	}
+
+	if name := r.Properties.MergerName; name != "" && name != "nullptr" {
+		if _, ok := o.Mergers[r.Properties.MergerName]; !ok {
+			r.err = fmt.Errorf("pebble/table: %d: unknown merger %s",
+				fileNum, r.Properties.MergerName)
+		}
+	}
+	return r, r.err
 }
 
 // Layout describes the block organization of an sstable.
