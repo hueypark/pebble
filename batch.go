@@ -413,6 +413,31 @@ func (b *Batch) Delete(key []byte, _ *WriteOptions) error {
 	return nil
 }
 
+func (b *Batch) SingleDelete(key []byte, _ *WriteOptions) error {
+	if len(b.storage.data) == 0 {
+		b.init(len(key) + binary.MaxVarintLen64 + batchHeaderLen)
+	}
+	if !b.increment() {
+		return ErrInvalidBatch
+	}
+
+	pos := len(b.storage.data)
+	offset := uint32(pos)
+	b.grow(1 + maxVarintLen32 + len(key))
+	b.storage.data[pos] = byte(InternalKeyKindSingleDelete)
+	pos, varlen1 := b.copyStr(pos+1, key)
+	b.storage.data = b.storage.data[:len(b.storage.data)-(maxVarintLen32-varlen1)]
+
+	if b.index != nil {
+		if err := b.index.Add(offset); err != nil {
+			// We never add duplicate entries, so an error should never occur.
+			panic(err)
+		}
+	}
+	b.memTableSize += memTableEntrySize(len(key), 0)
+	return nil
+}
+
 // DeleteRange deletes all of the keys (and values) in the range [start,end)
 // (inclusive on start, exclusive on end).
 //
